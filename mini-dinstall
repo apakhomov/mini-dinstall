@@ -349,6 +349,13 @@ if configp.has_option('DEFAULT', 'tweet_user'):
 if configp.has_option('DEFAULT', 'tweet_password'):
     tweet_password = configp.get('DEFAULT', 'tweet_password', 1)
 
+use_atomic_release = False
+
+if configp.has_option('DEFAULT', 'atomic'):
+    use_atomic_release = configp.getboolean('DEFAULT','atomic')
+
+
+
 sects = configp.sections()
 if not len(sects) == 0:
     for sect in sects:
@@ -390,6 +397,7 @@ class DistOptionHandler:
         self._optionmap['keyrings'] = ['list', None]
         self._optionmap['extra_keyrings'] = ['list', None]
         self._optionmap['verify_sigs'] = ['bool', 0]
+        self._optionmap['atomic'] = ['bool', 0]
 
     def get_option_map(self, dist):
         ret = self._distributions[dist]
@@ -1123,7 +1131,7 @@ class ArchiveDirIndexer(threading.Thread):
     def _relpath(self, *args):
         return apply(os.path.join, [self._name] + list(args))
 
-    def _make_indexfile(self, dir, type, name):
+    def _make_indexfile(self, dir, type, name, forcemove=False):
         if nodb_mode:
             cmdline = ['apt-ftparchive', type, dir]
         else:
@@ -1165,15 +1173,31 @@ class ArchiveDirIndexer(threading.Thread):
         newpackagesfile.close()
         newzpackagesfile.close()
         newbz2packagesfile.close()
+        if forcemove:
+            self._move_indexfiles(dir,name)
+
+    def _move_indexfiles(self,dir,name):
+        packagesfilename = os.path.join(dir, name)
+        newpackagesfilename = packagesfilename + '.new'
+        zpackagesfilename = packagesfilename + '.gz'
+        bz2packagesfilename = packagesfilename + '.bz2'
+        newzpackagesfilename = newpackagesfilename + '.gz'
+        newbz2packagesfilename = newpackagesfilename + '.bz2'
         shutil.move(newpackagesfilename, packagesfilename)
         shutil.move(newzpackagesfilename, zpackagesfilename)
         shutil.move(newbz2packagesfilename, bz2packagesfilename)
 
-    def _make_packagesfile(self, dir):
-        self._make_indexfile(dir, 'packages', 'Packages')
+    def _make_packagesfile(self, dir, forcemove=False):
+        self._make_indexfile(dir, 'packages', 'Packages', forcemove)
 
-    def _make_sourcesfile(self, dir):
-        self._make_indexfile(dir, 'sources', 'Sources')
+    def _make_sourcesfile(self, dir, forcemove=False):
+        self._make_indexfile(dir, 'sources', 'Sources', forcemove)
+
+    def _move_packagesfile(self, dir):
+        self._move_indexfiles(dir, 'packages', 'Packages')
+
+    def _move_sourcefile(self,dir):
+        self._move_indexfiles(dir, 'sources', 'Sources')
 
     def _sign_releasefile(self, name, dir):
         if self._release_signscript:
@@ -1355,7 +1379,7 @@ class SimpleSubdirArchiveDirIndexer(ArchiveDirIndexer):
                 pkgsfile = self._relpath(arch, 'Packages')
                 if force or (not os.access(pkgsfile, os.R_OK)) or dirmtime > os.stat(pkgsfile)[stat.ST_MTIME]:
                     self._logger.info('Generating Packages file for %s...' % (arch,))
-                    self._make_packagesfile(self._relpath(arch))
+                    self._make_packagesfile(self._relpath(arch),force)
                     self._logger.info('Packages generation complete')
                 else:
                     self._logger.info('Skipping generation of Packages file for %s' % (arch,))
@@ -1364,7 +1388,7 @@ class SimpleSubdirArchiveDirIndexer(ArchiveDirIndexer):
                 pkgsfile = self._relpath(arch, 'Sources')
                 if force or (not os.access(pkgsfile, os.R_OK)) or dirmtime > os.stat(pkgsfile)[stat.ST_MTIME]:
                     self._logger.info('Generating Sources file for %s...' % (arch,))
-                    self._make_sourcesfile(self._relpath('source'))
+                    self._make_sourcesfile(self._relpath('source'),force)
                     self._logger.info('Sources generation complete')
                 else:
                     self._logger.info('Skipping generation of Sources file for %s' % (arch,))
@@ -1446,14 +1470,14 @@ class FlatArchiveDirIndexer(ArchiveDirIndexer):
         dirmtime = os.stat(self._relpath())[stat.ST_MTIME]
         if force or (not os.access(pkgsfile, os.R_OK)) or dirmtime > os.stat(pkgsfile)[stat.ST_MTIME]:
             self._logger.info('Generating Packages file...')
-            self._make_packagesfile(self._relpath())
+            self._make_packagesfile(self._relpath(),force)
             self._logger.info('Packages generation complete')
         else:
             self._logger.info('Skipping generation of Packages file')
         pkgsfile = self._abspath('Sources')
         if force or (not os.access(pkgsfile, os.R_OK)) or dirmtime > os.stat(pkgsfile)[stat.ST_MTIME]:
             self._logger.info('Generating Sources file...')
-            self._make_sourcesfile(self._relpath())
+            self._make_sourcesfile(self._relpath(),force)
             self._logger.info('Sources generation complete')
         else:
             self._logger.info('Skipping generation of Sources file')
@@ -1517,6 +1541,14 @@ class FlatArchiveDirIndexer(ArchiveDirIndexer):
         if self._sign_releasefile(tmpname, self._abspath()):
             os.rename(tmpname, targetname)
             self._logger.info("Release generation complete")
+            if use_atomic_release:
+                self._logger.info("Moving newpackages to packages")
+                self._move_packagesfile(self._relpath())
+                self._logger.info("Moved newpackages to packages")
+                self._logger.info("Moving newsources to sources")
+                self._move_sourcesfile(self._relpath())
+                self._logger.info("Moved newsources to sources")
+
 
     def _in_archdir(self, *args):
         return apply(lambda x,self=self: self._abspath(x), args[1:])
