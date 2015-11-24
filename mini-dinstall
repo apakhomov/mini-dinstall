@@ -68,7 +68,7 @@ tweet_server = 'identica'
 tweet_user = None
 tweet_password = None
 
-use_atomic_release = 1
+use_atomic_release = 0
 
 default_architectures = ["all", "i386"]
 default_distributions = ("unstable",)
@@ -86,11 +86,14 @@ Changes:
 
 tweet_template = "Installed %(source)s %(version)s to %(distribution)s"
 
+tmpfileprefix = 'tmp_'
 
-fileset = {}
-fileset['pkgsfile'] = {0:'Packages', 1:'tmpPackages'}
-fileset['srcsfile'] = {0: 'Sources', 1:'tmpSources'}
-fileset['releasefile'] = {0: 'Release', 1: 'tmpRelease'}
+fileset =   {
+            'pkgsfile':     ['Packages', tmpfileprefix + 'Packages'],
+            'srcsfile':      ['Sources', tmpfileprefix + 'Sources'],
+            'releasefile':  ['Release', tmpfileprefix + 'Release']
+            }
+
 
 def usage(ecode, ver_only=None):
     print "mini-dinstall", pkg_version
@@ -359,7 +362,7 @@ if configp.has_option('DEFAULT', 'tweet_password'):
 
 
 if configp.has_option('DEFAULT', 'atomic_release'):
-    use_atomic_release = configp.getboolean('DEFAULT','atomic_release',1)
+    use_atomic_release = configp.getboolean('DEFAULT','atomic_release'      )
 
 sects = configp.sections()
 if not len(sects) == 0:
@@ -1241,13 +1244,21 @@ class ArchiveDirIndexer(threading.Thread):
             absfile = self._abspath(file)
             h = self._get_file_sum(hash, absfile)
             size = os.stat(absfile)[stat.ST_SIZE]
-            f.write(' %s% 16d %s\n' % (h, size, os.path.basename(absfile)))
+            if use_atomic_release:
+                filename = os.path.basename(absfile).replace(tmpfileprefix,'')
+            else:
+                filename = os.path.basename(absfile)
+            f.write(' %s% 16d %s\n' % (h, size, filename))
 
     def _index_all(self, force=None):
         self._index(self._arches + ['source'], force)
 
     def _gen_release_all(self, force=False):
         self._gen_release(self._arches, force)
+        if use_atomic_release:
+            self._logger.info("Sync release, packages and sources")
+            self._syncfiles(self._arches)
+
 
     def run(self):
         self._logger.info('Created new thread (%s) for archive indexer %s' % (self.getName(), self._name,))
@@ -1324,8 +1335,8 @@ class ArchiveDirIndexer(threading.Thread):
 
     def _reindex_needed(self):
         reindex_needed = 0
-        if os.access(self._abspath(fileset['releasefile'][use_atomic_release] + '.gpg'), os.R_OK):
-            gpg_mtime = os.stat(self._abspath(fileset['releasefile'][use_atomic_release] + '.gpg'))[stat.ST_MTIME]
+        if os.access(self._abspath(fileset['releasefile'][0] + '.gpg'), os.R_OK):
+            gpg_mtime = os.stat(self._abspath(fileset['releasefile'][0] + '.gpg'))[stat.ST_MTIME]
             for dir in self._get_dnotify_dirs():
                 dir_mtime = os.stat(self._abspath(dir))[stat.ST_MTIME]
                 if dir_mtime > gpg_mtime:
@@ -1339,6 +1350,9 @@ class ArchiveDirIndexer(threading.Thread):
 
     def _gen_release(self, arches, force=False):
         self._gen_release_impl(self._arches, force)
+
+    def _syncfiles(self,arches):
+        self._sync_impl(self._arches)
 
     def wait_reprocess(self):
         e = threading.Event()
@@ -1381,6 +1395,26 @@ class SimpleSubdirArchiveDirIndexer(ArchiveDirIndexer):
                     self._logger.info('Sources generation complete')
                 else:
                     self._logger.info('Skipping generation of Sources file for %s' % (arch,))
+
+    def _sync_impl(self, arches):
+        comprexts = ['', '.gz', '.bz2']
+        for arch in arches:
+            for type in ['pkgsfile','srcsfile','releasefile']:
+                for ext in comprexts:
+                    movingfile = self._relpath(arch, fileset[type][1]) + ext
+                    tmpfile = movingfile + '.1'
+                    if  os.access(movingfile, os.R_OK):
+                        self._logger.debug("Copying: {0} to {1}".format(movingfile,tmpfile))
+                        shutil.copyfile(movingfile, tmpfile)
+        for arch in arches:
+            for type in ['pkgsfile','srcsfile','releasefile']:
+                for ext in comprexts:
+                    movingfile = self._relpath(arch, fileset[type][1]) + ext
+                    tmpfile = movingfile + '.1'
+                    resultfile = self._relpath(arch, fileset[type][0]) + ext
+                    if  os.access(movingfile, os.R_OK):
+                        self._logger.debug("Moving: {0} to {1}".format(tmpfile,resultfile))
+                        os.rename(tmpfile, resultfile)
 
     def _gen_release_impl(self, arches, force):
         for arch in arches:
@@ -1463,7 +1497,7 @@ class FlatArchiveDirIndexer(ArchiveDirIndexer):
             self._logger.info('Packages generation complete')
         else:
             self._logger.info('Skipping generation of Packages file')
-        pkgsfile = self._abspath('Sources')
+        pkgsfile = self._abspath(fileset['srcsfile'][use_atomic_release])
         if force or (not os.access(pkgsfile, os.R_OK)) or dirmtime > os.stat(pkgsfile)[stat.ST_MTIME]:
             self._logger.info('Generating Sources file...')
             self._make_sourcesfile(self._relpath())
@@ -1530,6 +1564,24 @@ class FlatArchiveDirIndexer(ArchiveDirIndexer):
         if self._sign_releasefile(tmpname, self._abspath()):
             os.rename(tmpname, targetname)
             self._logger.info("Release generation complete")
+
+    def _sync_impl(self, arches):
+        comprexts = ['', '.gz', '.bz2']
+        for type in ['pkgsfile','srcsfile','releasefile']:
+            for ext in comprexts:
+                movingfile = self._abspath(fileset[type][1]) + ext
+                tmpfile = movingfile + '.1'
+                if  os.access(movingfile, os.R_OK):
+                    self._logger.debug("Copying: {0} to {1}".format(movingfile,tmpfile))
+                    shutil.copyfile(movingfile, tmpfile)
+        for type in ['pkgsfile','srcsfile','releasefile']:
+            for ext in comprexts:
+                movingfile = self._abspath(fileset[type][1]) + ext
+                tmpfile = movingfile + '.1'
+                resultfile = self._abspath(fileset[type][0]) + ext
+                if  os.access(movingfile, os.R_OK):
+                    self._logger.debug("Moving: {0} to {1}".format(tmpfile,resultfile))
+                    os.rename(tmpfile, resultfile)
 
     def _in_archdir(self, *args):
         return apply(lambda x,self=self: self._abspath(x), args[1:])
