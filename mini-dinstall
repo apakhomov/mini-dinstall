@@ -68,8 +68,6 @@ tweet_server = 'identica'
 tweet_user = None
 tweet_password = None
 
-use_atomic_release = 0
-
 default_architectures = ["all", "i386"]
 default_distributions = ("unstable",)
 
@@ -361,9 +359,6 @@ if configp.has_option('DEFAULT', 'tweet_password'):
     tweet_password = configp.get('DEFAULT', 'tweet_password', 1)
 
 
-if configp.has_option('DEFAULT', 'atomic_release'):
-    use_atomic_release = configp.getboolean('DEFAULT','atomic_release'      )
-
 sects = configp.sections()
 if not len(sects) == 0:
     for sect in sects:
@@ -405,7 +400,7 @@ class DistOptionHandler:
         self._optionmap['keyrings'] = ['list', None]
         self._optionmap['extra_keyrings'] = ['list', None]
         self._optionmap['verify_sigs'] = ['bool', 0]
-        self._optionmap['atomic_release'] = ['bool', 0]
+        self._optionmap['atomic_release'] = ['bool', self._optionmap['generate_release'][1]]
 
     def get_option_map(self, dist):
         ret = self._distributions[dist]
@@ -1186,10 +1181,10 @@ class ArchiveDirIndexer(threading.Thread):
         shutil.move(newbz2packagesfilename, bz2packagesfilename)
 
     def _make_packagesfile(self, dir):
-        self._make_indexfile(dir, 'packages', fileset['pkgsfile'][use_atomic_release])
+        self._make_indexfile(dir, 'packages', fileset['pkgsfile'][self._atomic_release])
 
     def _make_sourcesfile(self, dir):
-        self._make_indexfile(dir, 'sources', fileset['srcsfile'][use_atomic_release])
+        self._make_indexfile(dir, 'sources', fileset['srcsfile'][self._atomic_release])
 
     def _sign_releasefile(self, name, dir):
         if self._release_signscript:
@@ -1244,7 +1239,7 @@ class ArchiveDirIndexer(threading.Thread):
             absfile = self._abspath(file)
             h = self._get_file_sum(hash, absfile)
             size = os.stat(absfile)[stat.ST_SIZE]
-            if use_atomic_release:
+            if self._atomic_release:
                 filename = os.path.basename(absfile).replace(tmpfileprefix,'')
             else:
                 filename = os.path.basename(absfile)
@@ -1255,9 +1250,9 @@ class ArchiveDirIndexer(threading.Thread):
 
     def _gen_release_all(self, force=False):
         self._gen_release(self._arches, force)
-        if use_atomic_release:
-            self._logger.info("Sync release, packages and sources")
-            self._syncfiles(self._arches)
+
+    def _sync_files_all(self):
+        self._syncfiles(self._arches)
 
 
     def run(self):
@@ -1266,6 +1261,7 @@ class ArchiveDirIndexer(threading.Thread):
         try:
             self._index_all(1)
             self._gen_release_all(True)
+            self._sync_files_all()
             if not self._batch_mode:
                 # never returns
                 self._daemonize()
@@ -1325,23 +1321,30 @@ class ArchiveDirIndexer(threading.Thread):
                 self._logger.debug('Got general change')
                 self._index_all(1)
                 self._gen_release_all(True)
+                self._sync_files_all()
             else:
                 self._logger.debug('Got change in %s' % (dir,))
                 self._index([os.path.basename(os.path.abspath(dir))])
                 self._gen_release([os.path.basename(os.path.abspath(dir))])
+                self._syncfiles([os.path.basename(os.path.abspath(dir))])
             if setevent:
                 self._logger.debug('setting wait_reprocess event')
                 setevent.set()
 
     def _reindex_needed(self):
         reindex_needed = 0
+        self._logger.debug('Checking if reindex needed due to gpg and dirs mtime mismatch')
         if os.access(self._abspath(fileset['releasefile'][0] + '.gpg'), os.R_OK):
             gpg_mtime = os.stat(self._abspath(fileset['releasefile'][0] + '.gpg'))[stat.ST_MTIME]
+            self._logger.debug('Found GPG: {0}, mtime: {1}'.format(self._abspath(fileset['releasefile'][0] + '.gpg'), gpg_mtime))
             for dir in self._get_dnotify_dirs():
                 dir_mtime = os.stat(self._abspath(dir))[stat.ST_MTIME]
+                self._logger.debug('Dir: {0}, mtime: {1}'.format(dir,dir_mtime))
                 if dir_mtime > gpg_mtime:
+                    self._logger.debug('Reindex needed  ')
                     reindex_needed = 1
         else:
+            self._logger.debug('No access to {0}. Reindex needed'.format(self._abspath(fileset['releasefile'][0] + '.gpg')))
             reindex_needed = 1
         return reindex_needed
 
@@ -1379,7 +1382,7 @@ class SimpleSubdirArchiveDirIndexer(ArchiveDirIndexer):
         for arch in arches:
             dirmtime = os.stat(self._relpath(arch))[stat.ST_MTIME]
             if arch != 'source':
-                pkgsfile = self._relpath(arch, fileset['pkgsfile'][use_atomic_release])
+                pkgsfile = self._relpath(arch, fileset['pkgsfile'][self._atomic_release])
                 if force or (not os.access(pkgsfile, os.R_OK)) or dirmtime > os.stat(pkgsfile)[stat.ST_MTIME]:
                     self._logger.info('Generating Packages file for %s...' % (arch,))
                     self._make_packagesfile(self._relpath(arch))
@@ -1397,6 +1400,10 @@ class SimpleSubdirArchiveDirIndexer(ArchiveDirIndexer):
                     self._logger.info('Skipping generation of Sources file for %s' % (arch,))
 
     def _sync_impl(self, arches):
+        if not self._atomic_release:
+            self._logger.debug("NOT Atomic release. No need to do anything")
+            return
+        self._logger.debug("Atomic release. Syncing indexes")
         comprexts = ['', '.gz', '.bz2']
         for arch in arches:
             for type in ['pkgsfile','srcsfile','releasefile']:
@@ -1418,7 +1425,7 @@ class SimpleSubdirArchiveDirIndexer(ArchiveDirIndexer):
 
     def _gen_release_impl(self, arches, force):
         for arch in arches:
-            targetname = self._relpath(arch, fileset['releasefile'][use_atomic_release])
+            targetname = self._relpath(arch, fileset['releasefile'][self._atomic_release])
             if not self._generate_release:
                 if os.access(targetname, os.R_OK):
                     self._logger.info("Release generation disabled, removing existing Release file")
@@ -1429,7 +1436,7 @@ class SimpleSubdirArchiveDirIndexer(ArchiveDirIndexer):
                 return
             tmpname = targetname + tmp_new_suffix
             release_needed = 0
-            uncompr_indexfile = os.path.join(arch, fileset['pkgsfile'][use_atomic_release])
+            uncompr_indexfile = os.path.join(arch, fileset['pkgsfile'][self._atomic_release])
             indexfiles =  [uncompr_indexfile]
             comprexts = ['.gz', '.bz2']
             for ext in comprexts:
@@ -1482,14 +1489,14 @@ class SimpleSubdirArchiveDirIndexer(ArchiveDirIndexer):
         return map(lambda x, self=self: self._abspath(x), self._arches + ['source'])
 
     def _get_all_indexfiles(self):
-        return map(lambda arch: os.path.join(arch, fileset['pkgsfile'][use_atomic_release]), self._arches) + ['source/Sources']
+        return map(lambda arch: os.path.join(arch, fileset['pkgsfile'][self._atomic_release]), self._arches) + ['source/Sources']
 
 class FlatArchiveDirIndexer(ArchiveDirIndexer):
     def __init__(self, *args, **kwargs):
         apply(ArchiveDirIndexer.__init__, [self] + list(args), kwargs)
 
     def _index_impl(self, arches, force=None):
-        pkgsfile = self._abspath(fileset['pkgsfile'][use_atomic_release])
+        pkgsfile = self._abspath(fileset['pkgsfile'][self._atomic_release])
         dirmtime = os.stat(self._relpath())[stat.ST_MTIME]
         if force or (not os.access(pkgsfile, os.R_OK)) or dirmtime > os.stat(pkgsfile)[stat.ST_MTIME]:
             self._logger.info('Generating Packages file...')
@@ -1497,7 +1504,7 @@ class FlatArchiveDirIndexer(ArchiveDirIndexer):
             self._logger.info('Packages generation complete')
         else:
             self._logger.info('Skipping generation of Packages file')
-        pkgsfile = self._abspath(fileset['srcsfile'][use_atomic_release])
+        pkgsfile = self._abspath(fileset['srcsfile'][self._atomic_release])
         if force or (not os.access(pkgsfile, os.R_OK)) or dirmtime > os.stat(pkgsfile)[stat.ST_MTIME]:
             self._logger.info('Generating Sources file...')
             self._make_sourcesfile(self._relpath())
@@ -1506,7 +1513,7 @@ class FlatArchiveDirIndexer(ArchiveDirIndexer):
             self._logger.info('Skipping generation of Sources file')
 
     def _gen_release_impl(self, arches, force):
-        targetname = self._abspath(fileset['releasefile'][use_atomic_release])
+        targetname = self._abspath(fileset['releasefile'][self._atomic_release])
         if not self._generate_release:
             if os.access(targetname, os.R_OK):
                 self._logger.info("Release generation disabled, removing existing Release file")
@@ -1566,6 +1573,10 @@ class FlatArchiveDirIndexer(ArchiveDirIndexer):
             self._logger.info("Release generation complete")
 
     def _sync_impl(self, arches):
+        if not self._atomic_release:
+            self._logger.debug("NOT Atomic release. No need to do anything")
+            return
+        self._logger.debug("Atomic release. Syncing indexes")
         comprexts = ['', '.gz', '.bz2']
         for type in ['pkgsfile','srcsfile','releasefile']:
             for ext in comprexts:
@@ -1590,7 +1601,7 @@ class FlatArchiveDirIndexer(ArchiveDirIndexer):
         return [self._dir]
 
     def _get_all_indexfiles(self):
-        return [fileset['pkgsfile'][use_atomic_release], fileset['srcsfile'][use_atomic_release]]
+        return [fileset['pkgsfile'][self._atomic_release], fileset['srcsfile'][self._atomic_release]]
 
 if os.access(lockfilename, os.R_OK):
     logger.critical("lockfile \"%s\" exists (pid %s): is another mini-dinstall running?"  % (lockfilename, open(lockfilename).read(10)))
